@@ -196,6 +196,26 @@ class _RenderedStr(str):
         return rendered
 
 
+def _coerce_env_value(value) -> str:
+    """Render a config-supplied env value as the string a subprocess expects.
+
+    YAML has scalar types that environment blocks do not: ``FOO: 1`` is an int and
+    ``FOO: true`` is a bool, but ``os.environ`` (and the MCP SDK's
+    ``StdioServerParameters.env``, typed ``dict[str, str]``) only accepts strings.
+    Before this, an unquoted numeric value made the SDK reject the whole server with
+    "Input should be a valid string", so a correctly configured server silently failed
+    to start.
+
+    Booleans map to the shell convention ("1"/"0") rather than Python's "True"/"False" —
+    gates like ``ROBINHOOD_ALLOW_LIVE_WRITE`` are conventionally compared against "1".
+    """
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
 def _build_safe_env(user_env: Optional[dict]) -> dict:
     """Filtered env for stdio subprocesses so API keys/tokens don't leak: the safe baseline
     keys, ``XDG_*``, vars injected by an external secret source (users configured that backend
@@ -222,7 +242,13 @@ def _build_safe_env(user_env: Optional[dict]) -> dict:
         # (PATH, HOME, TERM, ...) at spawn anyway, so popping here would not unset it.
         for key, value in user_env.items():
             if not getattr(value, "unset_ref", False):
-                env[key] = value
+                # Config YAML is not typed the way subprocess env is: an unquoted
+                # `FOO: 1` parses as int, `FOO: true` as bool, `FOO: 1.0` as float.
+                # The MCP SDK's StdioServerParameters declares env as dict[str, str]
+                # and rejects any non-string, so a single numeric value prevents the
+                # whole server from starting ("Input should be a valid string").
+                # Coerce scalars here so config authors can write natural YAML.
+                env[key] = _coerce_env_value(value)
     from agent.delegation_context import delegated_child_subprocess_env
     return delegated_child_subprocess_env(env)
 
